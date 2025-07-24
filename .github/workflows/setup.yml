@@ -11,31 +11,31 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
-    - name: Install .NET Core
-      uses: actions/setup-dotnet@v3
-      with:
-        dotnet-version: 8.0.x
+      - name: Install .NET Core
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: 8.0.x
 
-    - name: Run the Cake script
-      uses: cake-build/cake-action@v1
-      with:
-        script-path: ./build.cake
+      - name: Run the Cake script
+        uses: cake-build/cake-action@v1
+        with:
+          script-path: ./build.cake
 
-    # 上传到 Actions Artifacts
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: flowOSD-setup
-        path: ./output/setup/*.*
-        retention-days: 7
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowOSD-setup
+          path: ./output/setup/*.*           # your build outputs
+          retention-days: 7                  # optional override
+          include-hidden-files: false        # omit hidden by default
 
-    # 再调用 Release Action（如果还需要发布 Release）
-    - uses: ncipollo/release-action@v1
-      with:
-        artifacts: "./output/setup/*.*"
-        draft: "true"
+      - name: Create GitHub Release (draft)
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "./output/setup/*.*"
+          draft: "true"
