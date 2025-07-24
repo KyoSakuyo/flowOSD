@@ -23,6 +23,7 @@ using System;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
+using System.Threading;
 using flowOSD.Core;
 using flowOSD.Core.Configs;
 using flowOSD.Core.Hardware;
@@ -40,6 +41,9 @@ sealed class PerformanceService : IDisposable, IPerformanceService
     private IPowerManagement powerManagement;
 
     private BehaviorSubject<PerformanceProfile> activeProfileSubject;
+
+    // 新增定时器字段
+    private Timer? repeatTimer;
 
     public PerformanceService(
         ITextResources textResources,
@@ -104,6 +108,24 @@ sealed class PerformanceService : IDisposable, IPerformanceService
             .ObserveOn(SynchronizationContext.Current!)
             .Subscribe(_ => Update())
             .DisposeWith(disposable);
+
+        // 启动每20秒重复应用当前激活性能模式的定时器
+        StartRepeatTimer();
+    }
+
+    private void StartRepeatTimer()
+    {
+        repeatTimer = new Timer(_ =>
+        {
+            // 每20秒重复应用当前激活的性能模式
+            SetActiveProfile(activeProfileSubject.Value.Id);
+        }, null, 0, 20000); // 20秒
+    }
+
+    private void StopRepeatTimer()
+    {
+        repeatTimer?.Dispose();
+        repeatTimer = null;
     }
 
     public PerformanceProfile DefaultProfile { get; }
@@ -116,6 +138,7 @@ sealed class PerformanceService : IDisposable, IPerformanceService
 
     public void Dispose()
     {
+        StopRepeatTimer();
         disposable?.Dispose();
         disposable = null;
     }
