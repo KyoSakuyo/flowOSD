@@ -2,8 +2,6 @@ name: Build flowOSD release
 
 on:
   push:
-    tags:
-    - v3.**
 
 jobs:
   build:
