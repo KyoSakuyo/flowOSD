@@ -3,6 +3,7 @@ using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using System.Threading;
+using System.Threading.Tasks;
 using flowOSD.Core;
 using flowOSD.Core.Configs;
 using flowOSD.Core.Hardware;
@@ -23,8 +24,8 @@ namespace flowOSD.Services.Hardware
 
         private readonly BehaviorSubject<PerformanceProfile> activeProfileSubject;
 
-        // 用来持有 Turbo 循环的订阅
-        private IDisposable? turboRepeater;
+        // 用于 Turbo 循环的 CancellationTokenSource
+        private CancellationTokenSource? turboCts;
 
         public PerformanceService(
             ITextResources textResources,
@@ -63,27 +64,33 @@ namespace flowOSD.Services.Hardware
 
             ActiveProfile = activeProfileSubject.AsObservable();
 
-            this.powerManagement.PowerSource.Throttle(TimeSpan.FromSeconds(2))
-                .CombineLatest(this.atk.TabletMode.Throttle(TimeSpan.FromSeconds(2)), (powerSource, tabletMode) => new { powerSource, tabletMode })
+            // 监听电源来源和平板模式变化
+            powerManagement.PowerSource
+                .Throttle(TimeSpan.FromSeconds(2))
+                .CombineLatest(
+                    atk.TabletMode.Throttle(TimeSpan.FromSeconds(2)),
+                    (powerSource, tabletMode) => (powerSource, tabletMode))
                 .Throttle(TimeSpan.FromMilliseconds(2))
                 .ObserveOn(SynchronizationContext.Current!)
                 .Subscribe(x => ChangeActiveProfile(x.powerSource, x.tabletMode))
                 .DisposeWith(disposable);
 
-            this.config.Performance.PropertyChanged
+            // 监听配置文件变更
+            config.Performance.PropertyChanged
                 .Where(IsActiveProfileProperty)
                 .Throttle(TimeSpan.FromMilliseconds(1))
                 .ObserveOn(SynchronizationContext.Current!)
                 .Subscribe(_ => ChangeActiveProfile())
                 .DisposeWith(disposable);
 
-            this.config.Performance.ProfileChanged
+            config.Performance.ProfileChanged
                 .Throttle(TimeSpan.FromMilliseconds(1))
                 .ObserveOn(SynchronizationContext.Current!)
                 .Subscribe(UpdateActiveProfile)
                 .DisposeWith(disposable);
 
-            this.atk.GpuMode
+            // 监听 GPU 模式变化
+            atk.GpuMode
                 .Skip(1)
                 .Throttle(TimeSpan.FromMilliseconds(1))
                 .ObserveOn(SynchronizationContext.Current!)
@@ -92,16 +99,13 @@ namespace flowOSD.Services.Hardware
         }
 
         public PerformanceProfile DefaultProfile { get; }
-
         public PerformanceProfile TurboProfile { get; }
-
         public PerformanceProfile SilentProfile { get; }
-
         public IObservable<PerformanceProfile> ActiveProfile { get; }
 
         public void Dispose()
         {
-            turboRepeater?.Dispose();
+            StopTurboLoop();
             disposable?.Dispose();
             disposable = null;
         }
@@ -113,87 +117,88 @@ namespace flowOSD.Services.Hardware
 
         public void SetActiveProfile(Guid id)
         {
-            // 如果是 Turbo，启动或保持每20秒重复设置 Turbo
             if (id == TurboProfile.Id)
             {
-                if (turboRepeater == null)
-                {
-                    turboRepeater = Observable
-                        .Interval(TimeSpan.FromSeconds(20))
-                        .ObserveOn(SynchronizationContext.Current!)
-                        .Subscribe(_ => activeProfileSubject.OnNext(TurboProfile));
-
-                    disposable?.Add(turboRepeater);
-                }
+                // 启动或重启 Turbo 循环
+                StartTurboLoop();
             }
             else
             {
-                // 切换到其他档位时，停止 Turbo 循环
-                turboRepeater?.Dispose();
-                turboRepeater = null;
+                // 停止 Turbo 循环
+                StopTurboLoop();
             }
 
-            // 推送本次切换
+            // 广播档位切换
             activeProfileSubject.OnNext(GetProfile(id));
+        }
+
+        private void StartTurboLoop()
+        {
+            // 取消已有循环
+            turboCts?.Cancel();
+            var cts = new CancellationTokenSource();
+            turboCts = cts;
+
+            Task.Run(async () =>
+            {
+                // 立即设置一次 Turbo
+                activeProfileSubject.OnNext(TurboProfile);
+                while (!cts.Token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(20), cts.Token);
+                        if (cts.Token.IsCancellationRequested) break;
+                        activeProfileSubject.OnNext(TurboProfile);
+                    }
+                    catch (TaskCanceledException)
+                    {
+                        break;
+                    }
+                }
+            }, cts.Token);
+        }
+
+        private void StopTurboLoop()
+        {
+            turboCts?.Cancel();
+            turboCts = null;
         }
 
         public PerformanceProfile GetProfile(Guid id)
         {
             if (id == DefaultProfile.Id)
-            {
                 return DefaultProfile;
-            }
-            else if (id == TurboProfile.Id)
-            {
+            if (id == TurboProfile.Id)
                 return TurboProfile;
-            }
-            else if (id == SilentProfile.Id)
-            {
+            if (id == SilentProfile.Id)
                 return SilentProfile;
-            }
-            else
-            {
-                return config.Performance[id] ?? DefaultProfile;
-            }
+            return config.Performance[id] ?? DefaultProfile;
         }
 
         private async void ChangeActiveProfile()
         {
             var powerSource = await powerManagement.PowerSource.FirstAsync();
             var tabletMode = await atk.TabletMode.FirstAsync();
-
             ChangeActiveProfile(powerSource, tabletMode);
         }
 
         private void ChangeActiveProfile(PowerSource powerSource, TabletMode tabletMode)
         {
-            Guid id;
-
-            if (tabletMode == TabletMode.Tablet)
-            {
-                id = config.Performance.TabletProfile;
-            }
-            else if (powerSource == PowerSource.Battery)
-            {
-                id = config.Performance.ChargerProfile;
-            }
-            else
-            {
-                id = config.Performance.BatteryProfile;
-            }
+            Guid id = tabletMode == TabletMode.Tablet
+                ? config.Performance.TabletProfile
+                : (powerSource == PowerSource.Battery
+                    ? config.Performance.ChargerProfile
+                    : config.Performance.BatteryProfile);
 
             if (activeProfileSubject.Value.Id != id)
-            {
                 SetActiveProfile(id);
-            }
         }
 
         private void UpdateActiveProfile(Guid changedProfileId)
         {
             if (activeProfileSubject.Value.Id != changedProfileId)
-            {
                 return;
-            }
 
             SetActiveProfile(changedProfileId);
         }
@@ -208,7 +213,6 @@ namespace flowOSD.Services.Hardware
         private async void ApplyProfile(PerformanceProfile profile)
         {
             atk.SetPerformanceMode(profile.PerformanceMode);
-
             if (profile.IsUserProfile && !await SetCustomProfile(profile))
             {
                 Common.TraceWarning("Can't set custom profile");
@@ -226,20 +230,17 @@ namespace flowOSD.Services.Hardware
                     Common.TraceWarning("Can't set CPU Fan Curve");
                     return false;
                 }
-
                 if (!atk.SetFanCurve(FanType.Gpu, profile.GpuFanCurve))
                 {
                     Common.TraceWarning("Can't set GPU Fan Curve");
                     return false;
                 }
             }
-
             if (!atk.SetCpuLimit(profile.CpuLimit))
             {
                 Common.TraceWarning("Can't set CPU Power Limit");
                 return false;
             }
-
             return true;
         }
     }
