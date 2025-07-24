@@ -4,6 +4,7 @@ using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Timers;
 using flowOSD.Core.Configs;
 using flowOSD.Core.Hardware;
 using flowOSD.Core.Resources;
@@ -17,8 +18,8 @@ namespace flowOSD.UI.Commands
         private readonly IAtk atk;
         private readonly IPowerManagement powerManagement;
         private readonly IPerformanceService performanceService;
-        private readonly IDisposable timerSubscription;
         private readonly CompositeDisposable disposables = new CompositeDisposable();
+        private readonly Timer timer;
 
         public PerformanceCommand(
             ITextResources textResources,
@@ -34,7 +35,7 @@ namespace flowOSD.UI.Commands
             this.powerManagement = powerManagement ?? throw new ArgumentNullException(nameof(powerManagement));
             this.performanceService = performanceService ?? throw new ArgumentNullException(nameof(performanceService));
 
-            // 切换时更新菜单打勾状态
+            // 订阅 Profile 变更，用于菜单中打勾状态同步
             performanceService.ActiveProfile
                 .ObserveOn(SynchronizationContext.Current!)
                 .Subscribe(profile => IsChecked = profile.Id != PerformanceProfile.DefaultId)
@@ -43,36 +44,40 @@ namespace flowOSD.UI.Commands
             Description = TextResources["Commands.Performance.Description"];
             Enabled = true;
 
-            // Rx 定时器：立即触发一次，然后每 20 秒重复
-            timerSubscription = Observable
-                .Timer(TimeSpan.Zero, TimeSpan.FromSeconds(20))
-                .ObserveOn(SynchronizationContext.Current!)
-                .Subscribe(_ => Execute());
+            // 每 20 秒触发一次，将 Turbo 档 ID 传入 Execute
+            timer = new Timer(20_000) {
+                AutoReset = true,
+                Enabled   = true
+            };
+            timer.Elapsed += OnTimerElapsed;
+        }
 
-            disposables.Add(timerSubscription);
+        private void OnTimerElapsed(object? sender, ElapsedEventArgs e)
+        {
+            // 确保回到 UI 线程再调用 Execute(Guid)
+            SynchronizationContext.Current?.Post(_ =>
+                Execute(PerformanceProfile.TurboId), null);
         }
 
         public override bool CanExecuteWithHotKey => true;
 
+        /// <summary>
+        /// 切换到指定档位；当 parameter 是 Guid 时，直接使用它。
+        /// </summary>
         public override async void Execute(object? parameter = null)
         {
-            if (!Enabled)
-                return;
+            if (!Enabled) return;
 
-            Guid nextId;
             if (parameter is Guid profileId)
             {
-                nextId = profileId;
+                performanceService.SetActiveProfile(profileId);
+                await SaveActiveProfile(profileId);
             }
-            else
-            {
-                nextId = await GetNextProfileId();
-            }
-
-            performanceService.SetActiveProfile(nextId);
-            await SaveActiveProfile(nextId);
         }
 
+        /// <summary>
+        /// 根据当前模式（平板/插电/电池）保存对应的 Profile ID。
+        /// </summary>
         private async Task SaveActiveProfile(Guid profileId)
         {
             if (await atk.TabletMode.FirstOrDefaultAsync() == TabletMode.Tablet)
@@ -89,19 +94,14 @@ namespace flowOSD.UI.Commands
             }
         }
 
-        private async Task<Guid> GetNextProfileId()
-        {
-            var profile = await performanceService.ActiveProfile.FirstAsync();
-            return profile.Id switch
-            {
-                _ when profile.Id == PerformanceProfile.DefaultId => PerformanceProfile.TurboId,
-                _ when profile.Id == PerformanceProfile.TurboId   => PerformanceProfile.SilentId,
-                _                                                  => PerformanceProfile.DefaultId,
-            };
-        }
-
         public void Dispose()
         {
+            // 停止并释放定时器
+            timer.Stop();
+            timer.Elapsed -= OnTimerElapsed;
+            timer.Dispose();
+
+            // 清理 Rx 订阅
             disposables.Dispose();
         }
     }
