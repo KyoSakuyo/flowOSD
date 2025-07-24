@@ -4,7 +4,6 @@ using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
-using System.Timers;
 using flowOSD.Core.Configs;
 using flowOSD.Core.Hardware;
 using flowOSD.Core.Resources;
@@ -19,7 +18,7 @@ namespace flowOSD.UI.Commands
         private readonly IPowerManagement powerManagement;
         private readonly IPerformanceService performanceService;
         private readonly CompositeDisposable disposables = new CompositeDisposable();
-        private readonly Timer timer;
+        private readonly System.Timers.Timer timer;
 
         public PerformanceCommand(
             ITextResources textResources,
@@ -35,7 +34,6 @@ namespace flowOSD.UI.Commands
             this.powerManagement = powerManagement ?? throw new ArgumentNullException(nameof(powerManagement));
             this.performanceService = performanceService ?? throw new ArgumentNullException(nameof(performanceService));
 
-            // 订阅 Profile 变更，用于菜单中打勾状态同步
             performanceService.ActiveProfile
                 .ObserveOn(SynchronizationContext.Current!)
                 .Subscribe(profile => IsChecked = profile.Id != PerformanceProfile.DefaultId)
@@ -44,26 +42,22 @@ namespace flowOSD.UI.Commands
             Description = TextResources["Commands.Performance.Description"];
             Enabled = true;
 
-            // 每 20 秒触发一次，将 Turbo 档 ID 传入 Execute
-            timer = new Timer(20_000) {
+            // 这里全限定到 System.Timers.Timer，避免跟 System.Threading.Timer 冲突
+            timer = new System.Timers.Timer(20_000) {
                 AutoReset = true,
                 Enabled   = true
             };
             timer.Elapsed += OnTimerElapsed;
         }
 
-        private void OnTimerElapsed(object? sender, ElapsedEventArgs e)
+        private void OnTimerElapsed(object? sender, System.Timers.ElapsedEventArgs e)
         {
-            // 确保回到 UI 线程再调用 Execute(Guid)
             SynchronizationContext.Current?.Post(_ =>
                 Execute(PerformanceProfile.TurboId), null);
         }
 
         public override bool CanExecuteWithHotKey => true;
 
-        /// <summary>
-        /// 切换到指定档位；当 parameter 是 Guid 时，直接使用它。
-        /// </summary>
         public override async void Execute(object? parameter = null)
         {
             if (!Enabled) return;
@@ -75,33 +69,21 @@ namespace flowOSD.UI.Commands
             }
         }
 
-        /// <summary>
-        /// 根据当前模式（平板/插电/电池）保存对应的 Profile ID。
-        /// </summary>
         private async Task SaveActiveProfile(Guid profileId)
         {
             if (await atk.TabletMode.FirstOrDefaultAsync() == TabletMode.Tablet)
-            {
                 config.Performance.TabletProfile = profileId;
-            }
             else if (await powerManagement.PowerSource.FirstOrDefaultAsync() == PowerSource.Battery)
-            {
                 config.Performance.ChargerProfile = profileId;
-            }
             else
-            {
                 config.Performance.BatteryProfile = profileId;
-            }
         }
 
         public void Dispose()
         {
-            // 停止并释放定时器
             timer.Stop();
             timer.Elapsed -= OnTimerElapsed;
             timer.Dispose();
-
-            // 清理 Rx 订阅
             disposables.Dispose();
         }
     }
