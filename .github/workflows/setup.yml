@@ -33,9 +33,3 @@ jobs:
           path: ./output/setup/*.*           # your build outputs
           retention-days: 7                  # optional override
           include-hidden-files: false        # omit hidden by default
-
-      - name: Create GitHub Release (draft)
-        uses: ncipollo/release-action@v1
-        with:
-          artifacts: "./output/setup/*.*"
-          draft: "true"
