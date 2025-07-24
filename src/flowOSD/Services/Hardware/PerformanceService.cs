@@ -42,8 +42,8 @@ sealed class PerformanceService : IDisposable, IPerformanceService
 
     private BehaviorSubject<PerformanceProfile> activeProfileSubject;
 
-    // 新增定时器字段
-    private Timer? repeatTimer;
+    // 新增：Turbo模式定时器
+    private Timer? turboRepeatTimer;
 
     public PerformanceService(
         ITextResources textResources,
@@ -108,24 +108,6 @@ sealed class PerformanceService : IDisposable, IPerformanceService
             .ObserveOn(SynchronizationContext.Current!)
             .Subscribe(_ => Update())
             .DisposeWith(disposable);
-
-        // 启动每20秒重复应用当前激活性能模式的定时器
-        StartRepeatTimer();
-    }
-
-    private void StartRepeatTimer()
-    {
-        repeatTimer = new Timer(_ =>
-        {
-            // 每20秒重复应用当前激活的性能模式
-            SetActiveProfile(activeProfileSubject.Value.Id);
-        }, null, 0, 20000); // 20秒
-    }
-
-    private void StopRepeatTimer()
-    {
-        repeatTimer?.Dispose();
-        repeatTimer = null;
     }
 
     public PerformanceProfile DefaultProfile { get; }
@@ -138,7 +120,7 @@ sealed class PerformanceService : IDisposable, IPerformanceService
 
     public void Dispose()
     {
-        StopRepeatTimer();
+        StopTurboRepeatTimer();
         disposable?.Dispose();
         disposable = null;
     }
@@ -148,9 +130,37 @@ sealed class PerformanceService : IDisposable, IPerformanceService
         ApplyProfile(activeProfileSubject.Value);
     }
 
+    // 修改：只在Turbo模式时启动定时器
     public void SetActiveProfile(Guid id)
     {
-        activeProfileSubject.OnNext(GetProfile(id));
+        var profile = GetProfile(id);
+        activeProfileSubject.OnNext(profile);
+
+        if (profile.PerformanceMode == PerformanceMode.Turbo)
+        {
+            StartTurboRepeatTimer(profile.Id);
+        }
+        else
+        {
+            StopTurboRepeatTimer();
+        }
+    }
+
+    // 新增：Turbo模式定时器启动
+    private void StartTurboRepeatTimer(Guid turboId)
+    {
+        StopTurboRepeatTimer(); // 防止重复启动
+        turboRepeatTimer = new Timer(_ =>
+        {
+            SetActiveProfile(turboId);
+        }, null, 20000, 20000); // 每20秒
+    }
+
+    // 新增：Turbo模式定时器停止
+    private void StopTurboRepeatTimer()
+    {
+        turboRepeatTimer?.Dispose();
+        turboRepeatTimer = null;
     }
 
     public PerformanceProfile GetProfile(Guid id)
