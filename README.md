@@ -19,3 +19,5 @@ I created this app for my own use and would be delighted if others found it help
 This app is tested on **GV301QH** model (120Hz WUXGA display). The proper functionality with other modifications are not guaranteed. 
 
 Dark and light themes are supported.
+
+Test
