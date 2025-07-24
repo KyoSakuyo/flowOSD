@@ -19,10 +19,12 @@
 
 namespace flowOSD.UI.Commands;
 
+using System;
 using System.ComponentModel;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using flowOSD.Core.Configs;
 using flowOSD.Core.Hardware;
 using flowOSD.Core.Resources;
@@ -35,13 +37,16 @@ public class PerformanceCommand : CommandBase
     private IPowerManagement powerManagement;
     private IPerformanceService performanceService;
 
+    // 新增：定时器字段
+    private Timer? repeatTimer;
+
     public PerformanceCommand(
         ITextResources textResources,
         IImageResources imageResources,
         IConfig config,
         IAtk atk,
         IPowerManagement powerManagement,
-        IPerformanceService performanceService) 
+        IPerformanceService performanceService)
         : base(
             textResources,
             imageResources)
@@ -69,17 +74,38 @@ public class PerformanceCommand : CommandBase
             return;
         }
 
-        if (parameter is Guid profileId)
+        Guid profileId;
+        if (parameter is Guid id)
         {
-            performanceService.SetActiveProfile(profileId);
-            await SaveActiveProfile(profileId);
+            profileId = id;
         }
         else
         {
-            var nextProfileId = await GetNextProfileId();
-            performanceService.SetActiveProfile(nextProfileId);
-            await SaveActiveProfile(nextProfileId);
+            profileId = await GetNextProfileId();
         }
+
+        performanceService.SetActiveProfile(profileId);
+        await SaveActiveProfile(profileId);
+
+        // 启动定时器，每20秒重复执行
+        StartRepeatTimer(profileId);
+    }
+
+    // 新增：定时器启动方法
+    private void StartRepeatTimer(Guid profileId)
+    {
+        StopRepeatTimer(); // 防止重复启动
+        repeatTimer = new Timer(_ =>
+        {
+            performanceService.SetActiveProfile(profileId);
+        }, null, 20000, 20000); // 每20秒
+    }
+
+    // 新增：定时器停止方法
+    private void StopRepeatTimer()
+    {
+        repeatTimer?.Dispose();
+        repeatTimer = null;
     }
 
     private async Task SaveActiveProfile(Guid profileId)
