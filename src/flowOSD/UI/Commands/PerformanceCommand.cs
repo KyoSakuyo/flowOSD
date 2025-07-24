@@ -1,25 +1,4 @@
-﻿/*  Copyright © 2021-2024, Albert Akhmetov <akhmetov@live.com>   
- *
- *  This file is part of flowOSD.
- *
- *  flowOSD is free software: you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation, either version 3 of the License, or
- *  (at your option) any later version.
- *
- *  flowOSD is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with flowOSD. If not, see <https://www.gnu.org/licenses/>.   
- *
- */
-
-namespace flowOSD.UI.Commands;
-
-using System;
+﻿using System;
 using System.ComponentModel;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
@@ -30,114 +9,100 @@ using flowOSD.Core.Hardware;
 using flowOSD.Core.Resources;
 using flowOSD.Extensions;
 
-public class PerformanceCommand : CommandBase
+namespace flowOSD.UI.Commands
 {
-    private IConfig config;
-    private IAtk atk;
-    private IPowerManagement powerManagement;
-    private IPerformanceService performanceService;
-
-    // 新增：定时器字段
-    private Timer? repeatTimer;
-
-    public PerformanceCommand(
-        ITextResources textResources,
-        IImageResources imageResources,
-        IConfig config,
-        IAtk atk,
-        IPowerManagement powerManagement,
-        IPerformanceService performanceService)
-        : base(
-            textResources,
-            imageResources)
+    public class PerformanceCommand : CommandBase, IDisposable
     {
-        this.config = config ?? throw new ArgumentNullException(nameof(config));
-        this.atk = atk ?? throw new ArgumentNullException(nameof(atk));
-        this.powerManagement = powerManagement ?? throw new ArgumentNullException(nameof(powerManagement));
-        this.performanceService = performanceService ?? throw new ArgumentNullException(nameof(performanceService));
+        private readonly IConfig config;
+        private readonly IAtk atk;
+        private readonly IPowerManagement powerManagement;
+        private readonly IPerformanceService performanceService;
+        private readonly IDisposable timerSubscription;
+        private readonly CompositeDisposable disposables = new CompositeDisposable();
 
-        this.performanceService.ActiveProfile
-            .ObserveOn(SynchronizationContext.Current!)
-            .Subscribe(profile => IsChecked = profile.Id != PerformanceProfile.DefaultId)
-            .DisposeWith(Disposable!);
-
-        Description = TextResources["Commands.Performance.Description"];
-        Enabled = true;
-    }
-
-    public override bool CanExecuteWithHotKey => true;
-
-    public override async void Execute(object? parameter = null)
-    {
-        if (!Enabled)
+        public PerformanceCommand(
+            ITextResources textResources,
+            IImageResources imageResources,
+            IConfig config,
+            IAtk atk,
+            IPowerManagement powerManagement,
+            IPerformanceService performanceService)
+            : base(textResources, imageResources)
         {
-            return;
+            this.config = config ?? throw new ArgumentNullException(nameof(config));
+            this.atk = atk ?? throw new ArgumentNullException(nameof(atk));
+            this.powerManagement = powerManagement ?? throw new ArgumentNullException(nameof(powerManagement));
+            this.performanceService = performanceService ?? throw new ArgumentNullException(nameof(performanceService));
+
+            // 切换时更新菜单打勾状态
+            performanceService.ActiveProfile
+                .ObserveOn(SynchronizationContext.Current!)
+                .Subscribe(profile => IsChecked = profile.Id != PerformanceProfile.DefaultId)
+                .DisposeWith(disposables);
+
+            Description = TextResources["Commands.Performance.Description"];
+            Enabled = true;
+
+            // Rx 定时器：立即触发一次，然后每 20 秒重复
+            timerSubscription = Observable
+                .Timer(TimeSpan.Zero, TimeSpan.FromSeconds(20))
+                .ObserveOn(SynchronizationContext.Current!)
+                .Subscribe(_ => Execute());
+
+            disposables.Add(timerSubscription);
         }
 
-        Guid profileId;
-        if (parameter is Guid id)
+        public override bool CanExecuteWithHotKey => true;
+
+        public override async void Execute(object? parameter = null)
         {
-            profileId = id;
-        }
-        else
-        {
-            profileId = await GetNextProfileId();
+            if (!Enabled)
+                return;
+
+            Guid nextId;
+            if (parameter is Guid profileId)
+            {
+                nextId = profileId;
+            }
+            else
+            {
+                nextId = await GetNextProfileId();
+            }
+
+            performanceService.SetActiveProfile(nextId);
+            await SaveActiveProfile(nextId);
         }
 
-        performanceService.SetActiveProfile(profileId);
-        await SaveActiveProfile(profileId);
-
-        // 启动定时器，每20秒重复执行
-        StartRepeatTimer(profileId);
-    }
-
-    // 新增：定时器启动方法
-    private void StartRepeatTimer(Guid profileId)
-    {
-        StopRepeatTimer(); // 防止重复启动
-        repeatTimer = new Timer(_ =>
+        private async Task SaveActiveProfile(Guid profileId)
         {
-            performanceService.SetActiveProfile(profileId);
-        }, null, 20000, 20000); // 每20秒
-    }
-
-    // 新增：定时器停止方法
-    private void StopRepeatTimer()
-    {
-        repeatTimer?.Dispose();
-        repeatTimer = null;
-    }
-
-    private async Task SaveActiveProfile(Guid profileId)
-    {
-        if (await atk.TabletMode.FirstOrDefaultAsync() == TabletMode.Tablet)
-        {
-            config.Performance.TabletProfile = profileId;
+            if (await atk.TabletMode.FirstOrDefaultAsync() == TabletMode.Tablet)
+            {
+                config.Performance.TabletProfile = profileId;
+            }
+            else if (await powerManagement.PowerSource.FirstOrDefaultAsync() == PowerSource.Battery)
+            {
+                config.Performance.ChargerProfile = profileId;
+            }
+            else
+            {
+                config.Performance.BatteryProfile = profileId;
+            }
         }
-        else if (await powerManagement.PowerSource.FirstOrDefaultAsync() == PowerSource.Battery)
-        {
-            config.Performance.ChargerProfile = profileId;
-        }
-        else
-        {
-            config.Performance.BatteryProfile = profileId;
-        }
-    }
 
-    private async Task<Guid> GetNextProfileId()
-    {
-        var profile = await performanceService.ActiveProfile.FirstAsync();
-        if (profile.Id == PerformanceProfile.DefaultId)
+        private async Task<Guid> GetNextProfileId()
         {
-            return PerformanceProfile.TurboId;
+            var profile = await performanceService.ActiveProfile.FirstAsync();
+            return profile.Id switch
+            {
+                _ when profile.Id == PerformanceProfile.DefaultId => PerformanceProfile.TurboId,
+                _ when profile.Id == PerformanceProfile.TurboId   => PerformanceProfile.SilentId,
+                _                                                  => PerformanceProfile.DefaultId,
+            };
         }
-        else if (profile.Id == PerformanceProfile.TurboId)
+
+        public void Dispose()
         {
-            return PerformanceProfile.SilentId;
-        }
-        else
-        {
-            return PerformanceProfile.DefaultId;
+            disposables.Dispose();
         }
     }
 }
